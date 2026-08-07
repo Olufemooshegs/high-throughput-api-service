@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+.venv/
+.env
+
+# Load-test artifacts can be large and machine-specific.
+loadtest/results/*
+!loadtest/results/.gitkeep
