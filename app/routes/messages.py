@@ -19,8 +19,10 @@ class Message(BaseModel):
 
 
 def get_pool(request: Request) -> asyncpg.Pool:
-    return request.app.state.db_pool
-
+    pool = getattr(request.app.state, "db_pool", None)
+    if pool is None:
+        raise HTTPException(status_code=503, detail="Database pool not initialized")
+    return pool
 
 @router.post("", response_model=Message, status_code=status.HTTP_201_CREATED)
 async def create_message(payload: MessageCreate, request: Request) -> dict[str, object]:
