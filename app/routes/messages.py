@@ -90,7 +90,7 @@ async def get_message(message_id: int, request: Request, response: Response) -> 
     pool = get_pool(request)
     cache = get_cache(request)
 
-    cached_message = await cache.get(cache_key(message_id))
+    cached_message = await safe_cache_get(cache, cache_key(message_id))
     if cached_message is not None:
         response.headers["X-Cache"] = "HIT"
         return json.loads(cached_message)
