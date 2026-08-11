@@ -2,7 +2,7 @@
 
 A FastAPI service built to handle **10,000+ requests per second** using async I/O, connection pooling, caching, and horizontal scaling. This project exists to demonstrate a solid understanding of concurrency, latency optimization, and load balancing — not just to build another CRUD API.
 
-> 📌 **Status:** In progress. Sections marked `[TODO]` will be filled in with real numbers as the project develops.
+> 📌 **Status:** In progress. Steps 1-3 (skeleton, PostgreSQL, Redis caching) are built and tested. Sections marked `[TODO]` will be filled in as the remaining steps land.
 
 ---
 
@@ -84,8 +84,19 @@ Every design choice below is made with those questions in mind, and documented s
 **Why async instead of just adding more threads/processes?**
 [TODO — one paragraph: the tradeoff you found between concurrency model and memory/CPU cost]
 
+**Why a fixed connection pool size (min=2, max=10) instead of scaling it to CPU/worker count?**
+At single-instance stage, a fixed pool keeps the behavior simple and observable. It also protects Postgres by capping how many connections this process can open. A pool sized off worker count only becomes useful once there are multiple instances to account for, since the real risk (every instance opening its own large pool and collectively exceeding Postgres's connection limit) does not exist yet with one instance. This will be revisited at step 5, once nginx and multiple API instances are added, since that is the point where sizing actually needs to account for the total across instances.
+
 **Why Redis caching, and what's the invalidation strategy?**
-[TODO — e.g., TTL-based vs write-through, and why you picked one]
+Two options were considered for keeping cached data correct:
+
+1. Cache-aside with TTL (what is implemented). On a cache miss, the app reads from Postgres and writes the result into Redis with a 60 second expiry. Simple to reason about and resilient, since a bug in the app cannot leave stale data in Redis forever. The tradeoff is that an update to a message would not be reflected in the cache until the TTL expires.
+2. Explicit invalidation on every write. Every update or delete would delete (or overwrite) the corresponding cache key immediately, keeping the cache always fresh. The tradeoff is correctness now depends on the app remembering to invalidate the right key on every mutation, which is an easy thing to miss as more endpoints are added.
+
+Cache-aside with TTL was chosen for now, since this project only has create and read endpoints (no update yet), so the staleness window that option 1 trades away barely applies. `POST /messages` also writes straight into the cache on creation, so a newly created message is a cache hit immediately rather than waiting for its first read. This makes the current setup closer to a hybrid: write-through on create, cache-aside with TTL on read.
+
+**How does the app handle Redis being unavailable?**
+Every Redis call in the request path is wrapped in a try/except that catches `redis.exceptions.RedisError` and falls back to treating it as a cache miss, logging a warning instead of raising. This was added after testing showed that without it, stopping the Redis container caused every read to fail with a 500, even though Postgres was completely healthy and could have served the request on its own. The cache is meant to be a performance optimization, not a hard dependency, so a Redis outage should degrade the app to "slower" rather than "down." This was verified by stopping the Redis container mid-run and confirming reads still returned 200 (with `X-Cache: MISS`) instead of failing.
 
 **Why least-connections over round-robin for the load balancer?**
 [TODO — what you observed that made this the better choice]
@@ -177,4 +188,3 @@ k6 run loadtest/scenario_ramp.js
 ## What I Learned
 
 `[TODO — 3-5 bullet points on real takeaways once the project is done. This section is often what a reviewer reads first, right after the results table, so make it specific rather than generic ("I learned async is fast") — name the actual tradeoff or surprise.]`
-
