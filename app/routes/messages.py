@@ -6,6 +6,8 @@ from fastapi import APIRouter, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 from redis.asyncio import Redis
 
+import logging
+from redis.exceptions import RedisError
 
 router = APIRouter(prefix="/messages", tags=["messages"])
 CACHE_TTL_SECONDS = 60
@@ -45,7 +47,22 @@ def serialize_message(row: asyncpg.Record) -> dict[str, object]:
         "content": row["content"],
         "created_at": row["created_at"].isoformat(),
     }
+logger = logging.getLogger(__name__)
 
+
+async def safe_cache_get(cache: Redis, key: str) -> str | None:
+    try:
+        return await cache.get(key)
+    except RedisError:
+        logger.warning("Redis GET failed for key=%s, falling back to DB", key)
+        return None
+
+
+async def safe_cache_set(cache: Redis, key: str, value: str, ttl: int) -> None:
+    try:
+        await cache.set(key, value, ex=ttl)
+    except RedisError:
+        logger.warning("Redis SET failed for key=%s, continuing without cache", key)
 
 @router.post("", response_model=Message, status_code=status.HTTP_201_CREATED)
 async def create_message(payload: MessageCreate, request: Request) -> dict[str, object]:
@@ -63,7 +80,7 @@ async def create_message(payload: MessageCreate, request: Request) -> dict[str, 
         )
 
     message = serialize_message(row)
-    await cache.set(cache_key(message["id"]), json.dumps(message), ex=CACHE_TTL_SECONDS)
+    await safe_cache_set(cache, cache_key(message["id"]), json.dumps(message), CACHE_TTL_SECONDS)
 
     return message
 
@@ -92,7 +109,7 @@ async def get_message(message_id: int, request: Request, response: Response) -> 
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Message not found")
 
     message = serialize_message(row)
-    await cache.set(cache_key(message_id), json.dumps(message), ex=CACHE_TTL_SECONDS)
+    await safe_cache_set(cache, cache_key(message_id), json.dumps(message), CACHE_TTL_SECONDS)
     response.headers["X-Cache"] = "MISS"
 
     return message
