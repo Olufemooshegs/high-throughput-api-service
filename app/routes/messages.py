@@ -1,11 +1,14 @@
+import json
 from datetime import datetime
 
 import asyncpg
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
+from redis.asyncio import Redis
 
 
 router = APIRouter(prefix="/messages", tags=["messages"])
+CACHE_TTL_SECONDS = 60
 
 
 class MessageCreate(BaseModel):
@@ -24,9 +27,30 @@ def get_pool(request: Request) -> asyncpg.Pool:
         raise HTTPException(status_code=503, detail="Database pool not initialized")
     return pool
 
+
+def get_cache(request: Request) -> Redis:
+    cache = getattr(request.app.state, "redis", None)
+    if cache is None:
+        raise HTTPException(status_code=503, detail="Redis cache not initialized")
+    return cache
+
+
+def cache_key(message_id: int) -> str:
+    return f"messages:{message_id}"
+
+
+def serialize_message(row: asyncpg.Record) -> dict[str, object]:
+    return {
+        "id": row["id"],
+        "content": row["content"],
+        "created_at": row["created_at"].isoformat(),
+    }
+
+
 @router.post("", response_model=Message, status_code=status.HTTP_201_CREATED)
 async def create_message(payload: MessageCreate, request: Request) -> dict[str, object]:
     pool = get_pool(request)
+    cache = get_cache(request)
 
     async with pool.acquire() as connection:
         row = await connection.fetchrow(
@@ -38,12 +62,21 @@ async def create_message(payload: MessageCreate, request: Request) -> dict[str, 
             payload.content,
         )
 
-    return dict(row)
+    message = serialize_message(row)
+    await cache.set(cache_key(message["id"]), json.dumps(message), ex=CACHE_TTL_SECONDS)
+
+    return message
 
 
 @router.get("/{message_id}", response_model=Message)
-async def get_message(message_id: int, request: Request) -> dict[str, object]:
+async def get_message(message_id: int, request: Request, response: Response) -> dict[str, object]:
     pool = get_pool(request)
+    cache = get_cache(request)
+
+    cached_message = await cache.get(cache_key(message_id))
+    if cached_message is not None:
+        response.headers["X-Cache"] = "HIT"
+        return json.loads(cached_message)
 
     async with pool.acquire() as connection:
         row = await connection.fetchrow(
@@ -58,4 +91,8 @@ async def get_message(message_id: int, request: Request) -> dict[str, object]:
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Message not found")
 
-    return dict(row)
+    message = serialize_message(row)
+    await cache.set(cache_key(message_id), json.dumps(message), ex=CACHE_TTL_SECONDS)
+    response.headers["X-Cache"] = "MISS"
+
+    return message
