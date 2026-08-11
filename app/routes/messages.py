@@ -1,16 +1,19 @@
 import json
+import logging
 from datetime import datetime
 
 import asyncpg
 from fastapi import APIRouter, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 from redis.asyncio import Redis
-
-import logging
 from redis.exceptions import RedisError
+
+from app.rate_limit import enforce_rate_limit
+
 
 router = APIRouter(prefix="/messages", tags=["messages"])
 CACHE_TTL_SECONDS = 60
+logger = logging.getLogger(__name__)
 
 
 class MessageCreate(BaseModel):
@@ -47,7 +50,6 @@ def serialize_message(row: asyncpg.Record) -> dict[str, object]:
         "content": row["content"],
         "created_at": row["created_at"].isoformat(),
     }
-logger = logging.getLogger(__name__)
 
 
 async def safe_cache_get(cache: Redis, key: str) -> str | None:
@@ -64,10 +66,12 @@ async def safe_cache_set(cache: Redis, key: str, value: str, ttl: int) -> None:
     except RedisError:
         logger.warning("Redis SET failed for key=%s, continuing without cache", key)
 
+
 @router.post("", response_model=Message, status_code=status.HTTP_201_CREATED)
 async def create_message(payload: MessageCreate, request: Request) -> dict[str, object]:
     pool = get_pool(request)
     cache = get_cache(request)
+    await enforce_rate_limit(cache, request, "POST /messages")
 
     async with pool.acquire() as connection:
         row = await connection.fetchrow(
@@ -89,6 +93,7 @@ async def create_message(payload: MessageCreate, request: Request) -> dict[str, 
 async def get_message(message_id: int, request: Request, response: Response) -> dict[str, object]:
     pool = get_pool(request)
     cache = get_cache(request)
+    await enforce_rate_limit(cache, request, "GET /messages/{message_id}")
 
     cached_message = await safe_cache_get(cache, cache_key(message_id))
     if cached_message is not None:
