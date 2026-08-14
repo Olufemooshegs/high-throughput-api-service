@@ -2,7 +2,7 @@
 
 A FastAPI service built to handle **10,000+ requests per second** using async I/O, connection pooling, caching, and horizontal scaling. This project exists to demonstrate a solid understanding of concurrency, latency optimization, and load balancing — not just to build another CRUD API.
 
-> 📌 **Status:** In progress. Steps 1-5 (skeleton, PostgreSQL, Redis caching, Redis-backed rate limiting, nginx load balancing) are built. Sections marked `[TODO]` will be filled in as the remaining steps land.
+> 📌 **Status:** In progress. Steps 1-6 (skeleton, PostgreSQL, Redis caching, Redis-backed rate limiting, nginx load balancing, per-instance backpressure) are built. Sections marked `[TODO]` will be filled in as the remaining steps land.
 
 ---
 
@@ -102,7 +102,7 @@ Every Redis call in the request path is wrapped in a try/except that catches `re
 Least-connections was chosen because this API now has mixed-latency paths: Redis cache hits, Redis misses that go to Postgres, writes, and Redis-backed rate-limit checks. Round robin balances request count, so it can keep sending traffic to an instance that is already busy with slower requests. Least-connections uses active connections as a simple pressure signal, so if one API instance is still handling work, nginx prefers another instance with fewer active connections. It is not a perfect measure of CPU or database pressure, but it better matches the behavior this project is trying to demonstrate.
 
 **How is backpressure handled?**
-[TODO — semaphore, queue depth limit, or 429s under load — and why]
+Each API instance has a bounded in-process concurrency limiter. If an instance already has `BACKPRESSURE_MAX_CONCURRENT_REQUESTS` active requests, it rejects new work immediately with `503 Service Unavailable` and a `Retry-After` header instead of letting requests pile up behind the Postgres pool. This is intentionally different from rate limiting: `429` means one client exceeded its quota, while `503` means this API instance is overloaded regardless of who the client is. The limiter is per-instance rather than shared in Redis because it protects local process capacity; Redis still handles shared state for cache and client-level rate limiting.
 
 ---
 
@@ -171,8 +171,9 @@ k6 run loadtest/scenario_ramp.js
 │   ├── main.py              # FastAPI app entrypoint
 │   ├── routes/               # API route definitions
 │   ├── db.py                  # Async DB connection pool setup
-│   ├── cache.py               # Redis client setup
-│   └── middleware/            # Rate limiting, logging, etc.
+│   ├── rate_limit.py          # Redis-backed sliding window rate limiter
+│   ├── backpressure.py        # Per-instance bounded concurrency limiter
+│   └── middleware/            # Future shared middleware helpers
 ├── loadtest/
 │   ├── scenario_ramp.js      # k6 script: gradual ramp-up
 │   ├── scenario_spike.js     # k6 script: sudden traffic spike
