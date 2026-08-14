@@ -2,7 +2,7 @@
 
 A FastAPI service built to handle **10,000+ requests per second** using async I/O, connection pooling, caching, and horizontal scaling. This project exists to demonstrate a solid understanding of concurrency, latency optimization, and load balancing — not just to build another CRUD API.
 
-> 📌 **Status:** In progress. Steps 1-6 (skeleton, PostgreSQL, Redis caching, rate limiting, nginx load balancing across 3 instances, per-instance backpressure) are built and tested. Load testing (step 7) is the remaining piece before this is portfolio-ready.
+> 📌 **Status:** In progress. Steps 1-7 (skeleton, PostgreSQL, Redis caching, rate limiting, nginx load balancing across 3 instances, per-instance backpressure, k6 load-test scripts) are built. Final benchmark numbers still need to be captured.
 
 ---
 
@@ -172,7 +172,7 @@ Load tests live in `/loadtest` and use [k6](https://k6.io/).
 
 ### Run a test
 ```bash
-k6 run loadtest/scenario_ramp.js
+k6 run loadtest/baseline_get_ramp.js
 ```
 
 ### What's being measured
@@ -210,8 +210,12 @@ k6 run loadtest/scenario_ramp.js
 │       ├── health.py          # GET /health
 │       └── messages.py        # POST /messages, GET /messages/{id} (cache + DB + rate limit wiring)
 ├── loadtest/
-│   ├── scenario_ramp.js      # k6 script: gradual ramp-up
-│   ├── scenario_spike.js     # k6 script: sudden traffic spike
+│   ├── README.md             # How to run and interpret the k6 scripts
+│   ├── baseline_get_ramp.js  # k6 script: cached GET ramp-up
+│   ├── mixed_traffic.js      # k6 script: reads + writes
+│   ├── rate_limit.js         # k6 script: intentional 429s
+│   ├── backpressure.js       # k6 script: intentional 503s
+│   ├── lib/                  # Shared k6 metrics helpers
 │   └── results/               # Saved test outputs and graphs
 ├── nginx.conf                 # Load balancer config (least_conn, X-Forwarded-For handling)
 ├── docker-compose.yml         # nginx + 3 API instances + Postgres + Redis
