@@ -1,16 +1,46 @@
+x-api-environment: &api-environment
+  DATABASE_URL: postgresql://app:app@db:5432/high_throughput
+  REDIS_URL: redis://redis:6379/0
+
+x-api-common: &api-common
+  build: .
+  expose:
+    - "8000"
+  depends_on:
+    db:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
 services:
-  api:
-    build: .
-    environment:
-      DATABASE_URL: postgresql://app:app@db:5432/high_throughput
-      REDIS_URL: redis://redis:6379/0
+  nginx:
+    image: nginx:1.27-alpine
     ports:
-      - "8000:8000"
+      - "8000:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
+      - api1
+      - api2
+      - api3
+
+  api1:
+    <<: *api-common
+    environment:
+      <<: *api-environment
+      INSTANCE_ID: api1
+
+  api2:
+    <<: *api-common
+    environment:
+      <<: *api-environment
+      INSTANCE_ID: api2
+
+  api3:
+    <<: *api-common
+    environment:
+      <<: *api-environment
+      INSTANCE_ID: api3
 
   db:
     image: postgres:16-alpine

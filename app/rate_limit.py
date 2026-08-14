@@ -26,16 +26,17 @@ return {1, request_count + 1}
 
 
 def get_client_ip(request: Request) -> str:
-    # X-Forwarded-For is intentionally ignored for now, since nothing
-    # trustworthy sits in front of this API yet. A client could set
-    # this header themselves to get a fresh rate limit bucket on every
-    # request. Once nginx is added in step 5, it will set this header
-    # itself and strip any client-supplied one, and this function
-    # should be updated to trust it at that point.
+    forwarded_for = request.headers.get("x-forwarded-for")
+    if forwarded_for:
+        # Safe after step 5 because nginx overwrites X-Forwarded-For with
+        # its own $remote_addr instead of appending a client-supplied value.
+        return forwarded_for.split(",")[0].strip()
+
     if request.client is None:
         return "unknown"
 
     return request.client.host
+
 
 def rate_limit_key(client_ip: str, route: str) -> str:
     return f"rate_limit:{client_ip}:{route}"
