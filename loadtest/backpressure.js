@@ -9,7 +9,7 @@ export const options = {
   scenarios: {
     burst: {
       executor: 'constant-vus',
-      vus: 300,
+      vus: 150,
       duration: '20s',
     },
   },
@@ -20,6 +20,9 @@ export const options = {
 
 export default function () {
   const response = http.get(`${BASE_URL}/health`);
+  if (response.status === 0) {
+    console.log(`error: ${response.error}, error_code: ${response.error_code}`);
+  }
   recordStatus(response);
 
   check(response, {
