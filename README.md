@@ -2,7 +2,7 @@
 
 A FastAPI service built to handle **10,000+ requests per second** using async I/O, connection pooling, caching, and horizontal scaling. This project exists to demonstrate a solid understanding of concurrency, latency optimization, and load balancing — not just to build another CRUD API.
 
-> 📌 **Status:** In progress. Steps 1-3 (skeleton, PostgreSQL, Redis caching) are built and tested. Sections marked `[TODO]` will be filled in as the remaining steps land.
+> 📌 **Status:** In progress. Steps 1-5 (skeleton, PostgreSQL, Redis caching, Redis-backed rate limiting, nginx load balancing) are built. Sections marked `[TODO]` will be filled in as the remaining steps land.
 
 ---
 
@@ -99,7 +99,7 @@ Cache-aside with TTL was chosen for now, since this project only has create and 
 Every Redis call in the request path is wrapped in a try/except that catches `redis.exceptions.RedisError` and falls back to treating it as a cache miss, logging a warning instead of raising. This was added after testing showed that without it, stopping the Redis container caused every read to fail with a 500, even though Postgres was completely healthy and could have served the request on its own. The cache is meant to be a performance optimization, not a hard dependency, so a Redis outage should degrade the app to "slower" rather than "down." This was verified by stopping the Redis container mid-run and confirming reads still returned 200 (with `X-Cache: MISS`) instead of failing.
 
 **Why least-connections over round-robin for the load balancer?**
-[TODO — what you observed that made this the better choice]
+Least-connections was chosen because this API now has mixed-latency paths: Redis cache hits, Redis misses that go to Postgres, writes, and Redis-backed rate-limit checks. Round robin balances request count, so it can keep sending traffic to an instance that is already busy with slower requests. Least-connections uses active connections as a simple pressure signal, so if one API instance is still handling work, nginx prefers another instance with fewer active connections. It is not a perfect measure of CPU or database pressure, but it better matches the behavior this project is trying to demonstrate.
 
 **How is backpressure handled?**
 [TODO — semaphore, queue depth limit, or 429s under load — and why]
@@ -177,6 +177,7 @@ k6 run loadtest/scenario_ramp.js
 │   ├── scenario_ramp.js      # k6 script: gradual ramp-up
 │   ├── scenario_spike.js     # k6 script: sudden traffic spike
 │   └── results/               # Saved test outputs and graphs
+├── nginx.conf
 ├── docker-compose.yml
 ├── Dockerfile
 ├── requirements.txt
