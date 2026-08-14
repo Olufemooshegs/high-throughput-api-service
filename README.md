@@ -2,7 +2,7 @@
 
 A FastAPI service built to handle **10,000+ requests per second** using async I/O, connection pooling, caching, and horizontal scaling. This project exists to demonstrate a solid understanding of concurrency, latency optimization, and load balancing — not just to build another CRUD API.
 
-> 📌 **Status:** In progress. Steps 1-6 (skeleton, PostgreSQL, Redis caching, Redis-backed rate limiting, nginx load balancing, per-instance backpressure) are built. Sections marked `[TODO]` will be filled in as the remaining steps land.
+> 📌 **Status:** In progress. Steps 1-6 (skeleton, PostgreSQL, Redis caching, rate limiting, nginx load balancing across 3 instances, per-instance backpressure) are built and tested. Load testing (step 7) is the remaining piece before this is portfolio-ready.
 
 ---
 
@@ -99,10 +99,44 @@ Cache-aside with TTL was chosen for now, since this project only has create and 
 Every Redis call in the request path is wrapped in a try/except that catches `redis.exceptions.RedisError` and falls back to treating it as a cache miss, logging a warning instead of raising. This was added after testing showed that without it, stopping the Redis container caused every read to fail with a 500, even though Postgres was completely healthy and could have served the request on its own. The cache is meant to be a performance optimization, not a hard dependency, so a Redis outage should degrade the app to "slower" rather than "down." This was verified by stopping the Redis container mid-run and confirming reads still returned 200 (with `X-Cache: MISS`) instead of failing.
 
 **Why least-connections over round-robin for the load balancer?**
-Least-connections was chosen because this API now has mixed-latency paths: Redis cache hits, Redis misses that go to Postgres, writes, and Redis-backed rate-limit checks. Round robin balances request count, so it can keep sending traffic to an instance that is already busy with slower requests. Least-connections uses active connections as a simple pressure signal, so if one API instance is still handling work, nginx prefers another instance with fewer active connections. It is not a perfect measure of CPU or database pressure, but it better matches the behavior this project is trying to demonstrate.
+Two options were considered:
+
+1. Round robin. nginx sends requests to each instance in strict rotation (1, 2, 3, 1, 2, 3...). Simple to explain and predictable, but it balances request count, not actual load. If one instance is stuck on a slow Postgres write while the other two are idle, round robin will still send it the next request just because it is "next in line."
+2. Least connections. nginx sends each new request to whichever instance currently has the fewest active connections. This accounts for actual load rather than just turn-taking, which matters here because this app has genuinely mixed-latency paths: fast Redis cache hits, slower Redis misses that fall through to Postgres, rate limit checks, and reads versus writes. The tradeoff is it is slightly more dynamic and less obviously "rotational" when watched manually.
+
+Least connections was chosen, since the app's latency is not uniform across requests, so balancing by actual load is a better match than balancing by turn order.
+
+In testing with fast, uniform requests (repeated GETs on the same cached message), least connections rotated across instances in a pattern that looked close to round robin, since there was nothing to differentiate load between instances. That is expected: with all requests finishing at similar speed, least connections has little to react to. The real difference between the two algorithms would show up under uneven load (e.g. mixing slow write-heavy requests with fast cached reads), which is a good candidate for the load testing phase.
+
+**How is state kept consistent now that there are multiple API instances?**
+Adding nginx and 3 API instances meant checking what state is shared versus what lives per-instance. Redis and Postgres were already shared from steps 2 and 3, so both the cache and the database are naturally consistent across instances. The rate limiter from step 4 was the one piece that needed verifying directly, since a per-instance in-memory counter would have silently broken once traffic was split three ways: each instance would only see roughly a third of the requests and the limit would rarely, if ever, trigger. This was tested directly by sending 25 rapid requests through nginx (which spread them across all 3 instances) and confirming the 21st request still returned 429. That confirmed the rate limit state is genuinely global, backed by Redis, rather than accidentally scoped to whichever instance handled a given request.
+
+**Why is X-Forwarded-For trusted now, when it was deliberately ignored in step 4?**
+In step 4, the rate limiter ignored the `X-Forwarded-For` header entirely, because nothing sat in front of the API to guarantee it was accurate. A client could set that header to any value it wanted and get a fresh rate limit bucket on every request, bypassing the limiter completely. Once nginx was added as the single entry point in step 5, this changed: nginx is configured to set `X-Forwarded-For` to `$remote_addr` (the real connecting client's IP), which replaces whatever value the original client sent rather than appending to it. Since nginx is now the only way to reach the API instances (they are not exposed directly), the header can be trusted again, and the rate limiter was updated to read it.
 
 **How is backpressure handled?**
-Each API instance has a bounded in-process concurrency limiter. If an instance already has `BACKPRESSURE_MAX_CONCURRENT_REQUESTS` active requests, it rejects new work immediately with `503 Service Unavailable` and a `Retry-After` header instead of letting requests pile up behind the Postgres pool. This is intentionally different from rate limiting: `429` means one client exceeded its quota, while `503` means this API instance is overloaded regardless of who the client is. The limiter is per-instance rather than shared in Redis because it protects local process capacity; Redis still handles shared state for cache and client-level rate limiting.
+Rate limiting (step 4) protects against one client sending too many requests. It does not protect against the system as a whole being overwhelmed, even by many different well-behaved clients at once, or against requests queueing silently behind an exhausted Postgres pool until latency quietly explodes. That is a separate problem, and backpressure is what handles it.
+
+Two options were considered:
+
+1. A bounded semaphore per instance that rejects new requests immediately once a concurrency limit is reached, before any work (DB calls, Redis calls, JSON parsing) starts.
+2. Letting requests enter normally and rely on the existing Postgres pool queue, but adding a short timeout so a request waiting too long for a connection fails with a 503 instead of hanging indefinitely.
+
+The bounded semaphore was chosen. The key difference is where in the request lifecycle the rejection happens. Option 2 still lets every request in, spend time on parsing and any Redis work, and only fail after already spending real work and latency on it, and only for requests that actually needed Postgres. The semaphore rejects at the door, before any work begins, which protects the whole request path rather than just the database-bound one, and keeps a failing request cheap instead of expensive.
+
+The limiter is per-instance rather than shared across instances via Redis. This is a deliberate difference from rate limiting, not an oversight. Rate limiting needed to be global because it is about one client's total behavior across the whole system, no matter which instance happens to handle a given request. Backpressure is different: it protects each instance's own local capacity, and that does not require coordination with the other instances. Making it global would mean adding a Redis round trip into the hottest part of the request path, for a property that is naturally already local.
+
+The response on rejection is a 503, not a 429, since the meaning is different: 429 says "this specific client is sending too much," 503 says "this instance is overloaded right now, regardless of who is asking." The response includes a `Retry-After` header and a JSON body describing the limit that was hit, in the same style as the 429 responses from rate limiting.
+
+This was tested by deliberately lowering the concurrency limit to 1 per instance (`BACKPRESSURE_MAX_CONCURRENT_REQUESTS=1`) and firing 10 concurrent requests through nginx. With 3 instances behind the load balancer, the result was 3 successful requests (one per instance, whichever request grabbed that instance's single slot first) and 7 immediate 503s, confirming the limiter rejects at the door rather than queueing.
+
+One tradeoff worth naming: the limiter uses a lock around a simple counter, so every request pays a small lock acquire and release just to check capacity, even when the instance is nowhere near its limit. At the concurrency levels this project targets, that cost is negligible next to a database call. At a much higher scale, that lock would become a real point of contention on its own and would be worth replacing with something lock-free. Not a problem today, but worth knowing where the ceiling of this specific implementation is.
+
+**Known gaps to revisit**
+A couple of things were noticed while building step 5 that are not fixed yet, but are worth tracking honestly rather than ignoring:
+
+- **Postgres pool sizing.** Each API instance still opens its own pool of `min=2, max=10` connections to Postgres. With 3 instances running, that is now up to 30 concurrent connections against Postgres's connection limit, instead of the 10 a single instance would use. This was the exact scenario flagged back in step 2 as the reason to defer CPU/worker-scaled pool sizing. It has not caused a problem yet, but should be revisited before load testing, since it is the kind of limit that only becomes visible once real concurrent traffic is pushed through the system.
+- **No readiness check before nginx routes traffic.** nginx currently waits for the API containers to start (`depends_on`), but not for them to actually be ready to serve requests. Postgres and Redis both use `condition: service_healthy` so nginx effectively waits on those indirectly through the API containers, but there is no direct health check confirming FastAPI itself has finished booting before nginx starts sending it traffic. In practice this could cause a handful of failed requests in the first second or two after a cold start. Not fixed yet, but noted here rather than left silent.
 
 ---
 
@@ -168,18 +202,19 @@ k6 run loadtest/scenario_ramp.js
 ```
 .
 ├── app/
-│   ├── main.py              # FastAPI app entrypoint
-│   ├── routes/               # API route definitions
-│   ├── db.py                  # Async DB connection pool setup
-│   ├── rate_limit.py          # Redis-backed sliding window rate limiter
-│   ├── backpressure.py        # Per-instance bounded concurrency limiter
-│   └── middleware/            # Future shared middleware helpers
+│   ├── main.py              # FastAPI app entrypoint, middleware registration
+│   ├── db.py                 # Async Postgres pool + Redis client, created in lifespan
+│   ├── rate_limit.py         # Sliding window log rate limiter (Redis sorted set + Lua script)
+│   ├── backpressure.py       # Per-instance bounded concurrency limiter
+│   └── routes/
+│       ├── health.py          # GET /health
+│       └── messages.py        # POST /messages, GET /messages/{id} (cache + DB + rate limit wiring)
 ├── loadtest/
 │   ├── scenario_ramp.js      # k6 script: gradual ramp-up
 │   ├── scenario_spike.js     # k6 script: sudden traffic spike
 │   └── results/               # Saved test outputs and graphs
-├── nginx.conf
-├── docker-compose.yml
+├── nginx.conf                 # Load balancer config (least_conn, X-Forwarded-For handling)
+├── docker-compose.yml         # nginx + 3 API instances + Postgres + Redis
 ├── Dockerfile
 ├── requirements.txt
 └── README.md
