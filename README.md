@@ -151,7 +151,7 @@ Documented honestly rather than left silent, since knowing where a system's edge
 ### Run locally
 ```bash
 git clone https://github.com/Olufemooshegs/high-throughput-api-service
-cd https://github.com/Olufemooshegs/high-throughput-api-service
+cd high-throughput-api-service
 docker-compose up --build
 ```
 
