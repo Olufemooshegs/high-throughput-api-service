@@ -98,6 +98,23 @@ flowchart LR
 5. On a cache miss, the request goes to Postgres through that instance's own connection pool (never opens a new raw connection per request).
 6. Nothing in this path uses blocking I/O. Every DB call, cache call, and outbound Redis call is `async`.
 
+**Message read flow:**
+
+```mermaid
+flowchart TD
+    request[Request for a message] --> cache_check{Redis cache check}
+
+    cache_check -->|Cache hit| return_cached[Return cached data]
+    cache_check -->|Cache miss| query_db[Query PostgreSQL]
+    cache_check -->|Redis failure| query_fallback[Query PostgreSQL fallback]
+
+    query_db --> populate_cache[Populate Redis cache]
+    populate_cache --> return_db[Return database data]
+    query_fallback --> return_fallback[Return database data]
+```
+
+If Redis is unavailable, the request continues to PostgreSQL instead of failing. The response is still served from the database, while the cache operation is skipped.
+
 ---
 
 ## Tech Stack
