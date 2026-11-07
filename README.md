@@ -33,28 +33,61 @@ Every design choice below is documented with the reasoning behind it, not just t
 
 ## Architecture
 
-```
-                     ┌─────────────────┐
-   Clients  ──────▶  │      nginx      │   (least_conn load balancing)
-                     └────────┬────────┘
-                              │
-              ┌───────────────┼───────────────┐
-              ▼               ▼               ▼
-        ┌──────────┐   ┌──────────┐    ┌──────────┐
-        │  api1    │   │  api2    │    │  api3    │   (3 FastAPI instances)
-        │          │   │          │    │          │
-        │ backpres.│   │ backpres.│    │ backpres.│   (per-instance concurrency limit)
-        └────┬─────┘   └────┬─────┘    └────┬─────┘
-             │              │               │
-             └──────────────┼───────────────┘
-                             ▼
-                     ┌───────────────┐
-                     │  Redis Cache   │  (hot reads, rate limit state, shared across instances)
-                     └───────┬────────┘
-                             ▼
-                     ┌───────────────┐
-                     │   PostgreSQL   │  (pooled async connections, shared across instances)
-                     └───────────────┘
+```mermaid
+flowchart LR
+    client[Clients] --> nginx
+
+    subgraph edge[Edge]
+        nginx[Nginx<br/>least_conn load balancing]
+    end
+
+    nginx --> api1
+    nginx --> api2
+    nginx --> api3
+
+    subgraph app[FastAPI application tier]
+        subgraph instance1[api1]
+            api1[Uvicorn process] --> bp1[Backpressure limiter]
+            bp1 --> routes1[Health and message routes]
+        end
+
+        subgraph instance2[api2]
+            api2[Uvicorn process] --> bp2[Backpressure limiter]
+            bp2 --> routes2[Health and message routes]
+        end
+
+        subgraph instance3[api3]
+            api3[Uvicorn process] --> bp3[Backpressure limiter]
+            bp3 --> routes3[Health and message routes]
+        end
+    end
+
+    routes1 --> rate[Sliding-window<br/>rate limiter]
+    routes2 --> rate
+    routes3 --> rate
+    rate --> redis
+
+    routes1 --> cache[Cache-aside reads<br/>and write-through creates]
+    routes2 --> cache
+    routes3 --> cache
+    cache --> redis
+
+    routes1 --> pool1[asyncpg pool<br/>2-10 connections]
+    routes2 --> pool2[asyncpg pool<br/>2-10 connections]
+    routes3 --> pool3[asyncpg pool<br/>2-10 connections]
+    pool1 --> postgres
+    pool2 --> postgres
+    pool3 --> postgres
+
+    subgraph data[Shared data services]
+        redis[(Redis)]
+        postgres[(PostgreSQL)]
+    end
+
+    classDef service fill:#e8f1fb,stroke:#2563eb,color:#111827
+    classDef dataStore fill:#fff4d6,stroke:#d97706,color:#111827
+    class nginx,api1,api2,api3,bp1,bp2,bp3,routes1,routes2,routes3,rate,cache,pool1,pool2,pool3 service
+    class redis,postgres dataStore
 ```
 
 **Request flow:**
